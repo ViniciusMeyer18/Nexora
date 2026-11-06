@@ -1,0 +1,80 @@
+@host = http://localhost:5241
+
+### Enviar evento válido
+
+POST {{host}}/api/events
+Content-Type: application/json
+
+{
+  "systemName": "SistemaVendas",
+  "eventId": "EVT003",
+  "recordId": "PED1050",
+  "eventType": "PedidoCriado",
+  "occurredAt": "2026-11-04T10:00:00",
+  "data": {
+    "orderId": 1050,
+    "amount": 250.00
+  }
+}
+
+### Teste de evento inválido
+
+POST {{host}}/api/events
+Content-Type: application/json
+
+{
+  "systemName": "",
+  "eventId": "EVT002",
+  "recordId": "PED1051",
+  "eventType": "PedidoCriado",
+  "occurredAt": "2026-11-04T10:00:00",
+  "data": {
+    "orderId": 1051
+  }
+}
+
+### Consultar todos os eventos
+
+GET {{host}}/api/events
+
+### Consultar evento específico
+
+GET {{host}}/api/events/"4a8bfbae-445e-4cba-abc2-3d6b71191046"
+
+### Evento do Sistema Financeiro
+
+POST {{host}}/api/events
+Content-Type: application/json
+
+{
+  "systemName": "SistemaFinanceiro",
+  "eventId": "EVT007",
+  "recordId": "PED1050",
+  "eventType": "PedidoCriado",
+  "occurredAt": "2026-11-05T10:00:00",
+  "data": {
+    "orderId": 1050,
+    "amount": 300.00
+  }
+}
+
+### Evento do Sistema de Vendas
+
+POST {{host}}/api/events
+Content-Type: application/json
+
+{
+  "systemName": "SistemaVendas",
+  "eventId": "EVT008",
+  "recordId": "PED1050",
+  "eventType": "PedidoCriado",
+  "occurredAt": "2026-11-05T10:00:00",
+  "data": {
+    "orderId": 1050,
+    "amount": 250.00
+  }
+}
+
+### Detectar inconsistências
+
+GET {{host}}/api/events/anomalies
