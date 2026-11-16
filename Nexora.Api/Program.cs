@@ -2,9 +2,14 @@ using System.Text.Json;
 using Nexora.Api.DTOs;
 using Nexora.Api.Models;
 using System.Text.Json.Nodes;
-using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
+using Nexora.Api.Data;
+
 
 var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddDbContext<NexoraDbContext>(options =>
+    options.UseNpgsql(
+        builder.Configuration.GetConnectionString("DefaultConnection")));
 var receivedEvents = new List<Event>();
 
 // Configuração dos serviços
@@ -39,7 +44,7 @@ app.MapGet("/api/status", () =>
 
 
 // Receber eventos de sistemas externos
-app.MapPost("/api/events", (CreateEventRequest request) =>
+    app.MapPost("/api/events", async (CreateEventRequest request, NexoraDbContext db) =>
 {
     if (string.IsNullOrWhiteSpace(request.SystemName) ||
         string.IsNullOrWhiteSpace(request.EventId) ||
@@ -61,7 +66,7 @@ app.MapPost("/api/events", (CreateEventRequest request) =>
     }
     
     // Verificar se o evento já foi recebido
-    if (receivedEvents.Any(e =>
+    if (await db.Events.AnyAsync(e =>
             e.SystemName == request.SystemName &&
             e.EventId == request.EventId))
     {
@@ -81,90 +86,90 @@ app.MapPost("/api/events", (CreateEventRequest request) =>
         OccurredAt = request.OccurredAt,
         Data = request.Data.GetRawText()
     };
-    receivedEvents.Add(newEvent);
+    db.Events.Add(newEvent);
+    await db.SaveChangesAsync();
     return Results.Created($"/api/events/{newEvent.Id}", newEvent);
 });
 // Consultar todos os eventos recebidos
-app.MapGet("/api/events", () =>
-{
-    return Results.Ok(receivedEvents);
-});
-
-// Consultar um evento específico pelo ID
-app.MapGet("/api/events/{id:guid}", (Guid id) =>
-{
-    var evento = receivedEvents.FirstOrDefault(e => e.Id == id);
-
-    if (evento == null)
+    app.MapGet("/api/events", async (NexoraDbContext db) =>
     {
-        return Results.NotFound(new
-        {
-            mensagem = "Evento não encontrado."
-        });
-    }
+        var eventos = await db.Events.ToListAsync();
+        return Results.Ok(eventos);
+    });
+// Consultar um evento específico pelo ID
+    app.MapGet("/api/events/{id:guid}", async (Guid id, NexoraDbContext db) =>
+    {
+        var evento = await db.Events.FirstOrDefaultAsync(e => e.Id == id);
 
-    return Results.Ok(evento);
-});
+        if (evento == null)
+        {
+            return Results.NotFound(new
+            {
+                mensagem = "Evento não encontrado."
+            });
+        }
+
+        return Results.Ok(evento);
+    });
 // Detectar inconsistências entre sistemas
-app.MapGet("/api/events/anomalies", () =>
-{
-    var inconsistencias = receivedEvents
-        .GroupBy(e => new { e.RecordId, e.EventType })
-        .Where(grupo =>
-        {
-            var eventos = grupo.ToList();
+   
+    // Detectar inconsistências entre sistemas
+    app.MapGet("/api/events/anomalies", async (NexoraDbContext db) =>
+    {
+        var receivedEvents = await db.Events.ToListAsync();
 
-            bool sistemasDiferentes = eventos
-                .Select(e => e.SystemName)
-                .Distinct()
-                .Count() > 1;
-
-            bool dadosDiferentes = eventos
-                .Select(e => JsonNode.Parse(e.Data))
-                .Skip(1)
-                .Any(dado => !JsonNode.DeepEquals(
-                    JsonNode.Parse(eventos[0].Data), dado));
-
-            return sistemasDiferentes && dadosDiferentes;
-        })
-        .Select(grupo =>
-        {
-            var eventos = grupo.ToList();
-
-            var valores = eventos
-                .Select(e => JsonDocument.Parse(e.Data).RootElement
-                    .GetProperty("amount").GetDecimal())
-                .ToList();
-
-            var diferenca = valores.Max() - valores.Min();
-            
-            string gravidade;
-
-            if (diferenca < 100)
+        var inconsistencias = receivedEvents
+            .GroupBy(e => new { e.RecordId, e.EventType })
+            .Where(grupo =>
             {
-                gravidade = "Baixa";
-            }
-            else if (diferenca < 500)
-            {
-                gravidade = "Média";
-            }
-            else
-            {
-                gravidade = "Alta";
-            }
+                var eventos = grupo.ToList();
 
-            return new
-            {
-                registro = grupo.Key.RecordId,
-                tipoEvento = grupo.Key.EventType,
-                gravidade = gravidade,
-                mensagem = "Divergência identificada entre sistemas!",
-                valoresEncontrados = valores,
-                diferencaFinanceira = diferenca,
-                eventos = eventos
-            };
-        });
-    return Results.Ok(inconsistencias);
-});
+                bool sistemasDiferentes = eventos
+                    .Select(e => e.SystemName)
+                    .Distinct()
+                    .Count() > 1;
 
-app.Run();
+                bool dadosDiferentes = eventos
+                    .Select(e => JsonNode.Parse(e.Data))
+                    .Skip(1)
+                    .Any(dado => !JsonNode.DeepEquals(
+                        JsonNode.Parse(eventos[0].Data), dado));
+
+                return sistemasDiferentes && dadosDiferentes;
+            })
+            .Select(grupo =>
+            {
+                var eventos = grupo.ToList();
+
+                var valores = eventos
+                    .Select(e => JsonDocument.Parse(e.Data).RootElement
+                        .GetProperty("amount").GetDecimal())
+                    .ToList();
+
+                var diferenca = valores.Max() - valores.Min();
+
+                string gravidade;
+
+                if (diferenca < 100)
+                    gravidade = "Baixa";
+                else if (diferenca < 500)
+                    gravidade = "Média";
+                else
+                    gravidade = "Alta";
+
+                return new
+                {
+                    registro = grupo.Key.RecordId,
+                    tipoEvento = grupo.Key.EventType,
+                    gravidade = gravidade,
+                    mensagem = "Divergência identificada entre sistemas!",
+                    valoresEncontrados = valores,
+                    diferencaFinanceira = diferenca,
+                    eventos = eventos
+                };
+            });
+
+        return Results.Ok(inconsistencias);
+    });
+
+    app.Run();
