@@ -4,13 +4,18 @@ using Nexora.Api.Models;
 using System.Text.Json.Nodes;
 using Microsoft.EntityFrameworkCore;
 using Nexora.Api.Data;
+using Nexora.Api.Services;
 
 
 var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddScoped<AlertPriorityService>();
+builder.Services.AddScoped<DashboardService>();
+builder.Services.AddScoped<AnomalyDetectionService>();
+builder.Services.AddScoped<AlertRecurrenceService>();
+builder.Services.AddScoped<SystemPerformanceService>();
 builder.Services.AddDbContext<NexoraDbContext>(options =>
     options.UseNpgsql(
         builder.Configuration.GetConnectionString("DefaultConnection")));
-var receivedEvents = new List<Event>();
 
 // Configuração dos serviços
 builder.Services.AddOpenApi();
@@ -111,65 +116,124 @@ app.MapGet("/api/status", () =>
 
         return Results.Ok(evento);
     });
-// Detectar inconsistências entre sistemas
    
-    // Detectar inconsistências entre sistemas
-    app.MapGet("/api/events/anomalies", async (NexoraDbContext db) =>
+// Detectar inconsistências entre sistemas
+    app.MapGet("/api/events/anomalies", async (
+        NexoraDbContext db,
+        AnomalyDetectionService anomalyService) =>
     {
-        var receivedEvents = await db.Events.ToListAsync();
+        var eventos = await db.Events.ToListAsync();
 
-        var inconsistencias = receivedEvents
-            .GroupBy(e => new { e.RecordId, e.EventType })
-            .Where(grupo =>
-            {
-                var eventos = grupo.ToList();
-
-                bool sistemasDiferentes = eventos
-                    .Select(e => e.SystemName)
-                    .Distinct()
-                    .Count() > 1;
-
-                bool dadosDiferentes = eventos
-                    .Select(e => JsonNode.Parse(e.Data))
-                    .Skip(1)
-                    .Any(dado => !JsonNode.DeepEquals(
-                        JsonNode.Parse(eventos[0].Data), dado));
-
-                return sistemasDiferentes && dadosDiferentes;
-            })
-            .Select(grupo =>
-            {
-                var eventos = grupo.ToList();
-
-                var valores = eventos
-                    .Select(e => JsonDocument.Parse(e.Data).RootElement
-                        .GetProperty("amount").GetDecimal())
-                    .ToList();
-
-                var diferenca = valores.Max() - valores.Min();
-
-                string gravidade;
-
-                if (diferenca < 100)
-                    gravidade = "Baixa";
-                else if (diferenca < 500)
-                    gravidade = "Média";
-                else
-                    gravidade = "Alta";
-
-                return new
-                {
-                    registro = grupo.Key.RecordId,
-                    tipoEvento = grupo.Key.EventType,
-                    gravidade = gravidade,
-                    mensagem = "Divergência identificada entre sistemas!",
-                    valoresEncontrados = valores,
-                    diferencaFinanceira = diferenca,
-                    eventos = eventos
-                };
-            });
+        var inconsistencias = await anomalyService.DetectarInconsistencias(eventos);
 
         return Results.Ok(inconsistencias);
     });
+    app.MapGet("/api/alerts", async (NexoraDbContext db) =>
+    {
+        var alertas = await db.Alerts
+            .OrderByDescending(a => a.CreatedAt)
+            .ToListAsync();
+
+        return Results.Ok(alertas);
+    });
+   
+    app.MapPatch("/api/alerts/{id:guid}/resolve", async (
+        Guid id,
+        NexoraDbContext db) =>
+    {
+        var alerta = await db.Alerts.FindAsync(id);
+
+        if (alerta == null)
+            return Results.NotFound("Alerta não encontrado.");
+
+        if (alerta.Resolved)
+            return Results.BadRequest("Este alerta já foi resolvido.");
+
+        alerta.Resolved = true;
+
+        var historico = new AlertHistory
+        {
+            AlertId = alerta.Id,
+            Action = "Resolvido",
+            Description = "O alerta foi marcado como resolvido."
+        };
+
+        db.AlertHistories.Add(historico);
+
+        await db.SaveChangesAsync();
+
+        return Results.Ok(alerta);
+    });
+
+    app.MapGet("/api/alerts/{id:guid}/history", async (
+        Guid id,
+        NexoraDbContext db) =>
+    {
+        var alertaExiste = await db.Alerts.AnyAsync(a => a.Id == id);
+
+        if (!alertaExiste)
+            return Results.NotFound("Alerta não encontrado.");
+
+        var historico = await db.AlertHistories
+            .Where(h => h.AlertId == id)
+            .OrderBy(h => h.CreatedAt)
+            .ToListAsync();
+
+        return Results.Ok(historico);
+    });
+
+    app.MapGet("/api/dashboard/summary", async (
+        DashboardService dashboardService) =>
+    {
+        var resumo = await dashboardService.GetSummaryAsync();
+
+        return Results.Ok(resumo);
+    });
+
+    app.MapGet("/api/alerts/prioritized", async (
+        NexoraDbContext db,
+        AlertPriorityService priorityService) =>
+    {
+        var alertas = await db.Alerts
+            .Where(a => !a.Resolved)
+            .ToListAsync();
+
+        var resultado = alertas
+            .Select(alerta => new
+            {
+                alerta.Id,
+                alerta.RecordId,
+                alerta.EventType,
+                alerta.Severity,
+                alerta.FinancialDifference,
+                alerta.Message,
+                prioridade = priorityService.CalcularPrioridade(alerta)
+            })
+            .OrderByDescending(a => a.prioridade)
+            .ToList();
+
+        return Results.Ok(resultado);
+    });
+
+    app.MapGet("/api/alerts/recurrences", async (
+        AlertRecurrenceService recurrenceService) =>
+    {
+        var reincidencias =
+            await recurrenceService.GetRecurrencesAsync();
+
+        return Results.Ok(reincidencias);
+    });
+
+    app.MapGet("/api/systems/performance", async (
+        SystemPerformanceService performanceService) =>
+    {
+        var desempenho =
+            await performanceService.GetSystemFailuresAsync();
+
+        return Results.Ok(desempenho);
+    });
+
+
+
 
     app.Run();
